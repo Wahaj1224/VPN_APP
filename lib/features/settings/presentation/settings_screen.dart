@@ -78,7 +78,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           icon: Icons.auto_mode,
           onChanged: (value) {
             unawaited(() async {
-              await ref.read(hapticsServiceProvider).selection();
+              // Only trigger haptics if haptics is currently enabled
+              if (preferences.hapticsEnabled) {
+                await ref.read(hapticsServiceProvider).selection();
+              }
               await ref.read(preferencesControllerProvider.notifier).toggleAutoServerSwitch(value);
             }());
           },
@@ -91,7 +94,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           icon: Icons.vibration,
           onChanged: (value) {
             unawaited(() async {
-              await ref.read(hapticsServiceProvider).selection();
+              // Only trigger haptics if haptics is currently enabled AND we're not disabling it
+              if (preferences.hapticsEnabled && value) {
+                await ref.read(hapticsServiceProvider).selection();
+              }
               await ref.read(preferencesControllerProvider.notifier).toggleHaptics(value);
             }());
           },
@@ -256,7 +262,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           onChanged: (value) {
             unawaited(() async {
-              await ref.read(hapticsServiceProvider).selection();
+              // Only trigger haptics if haptics is currently enabled
+              final hapticsEnabled = ref.read(
+                preferencesControllerProvider.select((state) => state.hapticsEnabled),
+              );
+              if (hapticsEnabled) {
+                await ref.read(hapticsServiceProvider).selection();
+              }
               await ref.read(preferencesControllerProvider.notifier).setLocale(value);
             }());
           },
@@ -328,7 +340,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _showAddReferralDialog(BuildContext context) async {
     final l10n = context.l10n;
-    await ref.read(hapticsServiceProvider).selection();
+    // Only trigger haptics if haptics is currently enabled
+    final hapticsEnabled = ref.read(
+      preferencesControllerProvider.select((state) => state.hapticsEnabled),
+    );
+    if (hapticsEnabled) {
+      await ref.read(hapticsServiceProvider).selection();
+    }
     final controller = TextEditingController();
     try {
       final result = await showDialog<String?>(
@@ -427,7 +445,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _handleLimitTap(BuildContext context, int? currentLimit) async {
-    await ref.read(hapticsServiceProvider).selection();
+    // Only trigger haptics if haptics is currently enabled
+    final hapticsEnabled = ref.read(
+      preferencesControllerProvider.select((state) => state.hapticsEnabled),
+    );
+    if (hapticsEnabled) {
+      await ref.read(hapticsServiceProvider).selection();
+    }
     final result = await _showLimitDialog(context, currentLimit);
     if (!mounted || result == null) {
       return;
@@ -447,7 +471,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _handleResetUsage() async {
-    await ref.read(hapticsServiceProvider).selection();
+    // Only trigger haptics if haptics is currently enabled
+    final hapticsEnabled = ref.read(
+      preferencesControllerProvider.select((state) => state.hapticsEnabled),
+    );
+    if (hapticsEnabled) {
+      await ref.read(hapticsServiceProvider).selection();
+    }
     await ref.read(dataUsageControllerProvider.notifier).resetUsage();
   }
 }

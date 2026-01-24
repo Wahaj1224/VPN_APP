@@ -1053,12 +1053,13 @@ class _ConnectPage extends StatelessWidget {
                 selected: state.serverMode == OnboardingServerMode.manual,
                 onSelected: (_) => unawaited(onSelectManual()),
               ),
-              ChoiceChip(
-                label: const Text('Import .ovpn'),
-                selected: state.serverMode == OnboardingServerMode.imported,
-                onSelected: (_) => unawaited(onImport()),
-              ),
+              // ChoiceChip(
+              //   label: const Text('Import .ovpn'),
+              //   selected: state.serverMode == OnboardingServerMode.imported,
+              //   onSelected: (_) => unawaited(onImport()),
+              // ),
             ],
+
           ),
           const SizedBox(height: 12),
           if (state.serverMode != OnboardingServerMode.imported && state.selectedServer != null)

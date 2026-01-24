@@ -43,12 +43,40 @@ class SessionController extends StateNotifier<SessionState> {
         super(SessionState.initial()) {
     _speedSubscription =
         _ref.listen<SpeedTestState>(speedTestControllerProvider, _onSpeedUpdate);
+    
+    // CRITICAL FIX: Initialize notification service with timeout to prevent hanging
+    // Do this in background with error handling
     unawaited(
-      _notificationService.initialize(onAction: _handleNotificationAction),
+      _notificationService
+          .initialize(onAction: _handleNotificationAction)
+          .timeout(
+            const Duration(seconds: 5),
+            onTimeout: () {
+              _log('Notification service initialization timed out');
+            },
+          )
+          .catchError((error) {
+            _log('Notification service initialization failed: $error');
+          }),
     );
-    _stageSubscription = _vpnPort.stageStream.listen((stage) {
-      unawaited(_handleVpnStage(stage));
-    });
+    
+    // CRITICAL FIX: Setup stage stream listener with error handling
+    // This prevents hanging if the stream throws or becomes stuck
+    _stageSubscription = _vpnPort.stageStream.listen(
+      (stage) {
+        try {
+          unawaited(_handleVpnStage(stage));
+        } catch (e) {
+          _log('Error handling VPN stage: $e');
+        }
+      },
+      onError: (error, stackTrace) {
+        _log('VPN stage stream error: $error');
+        _log('Stack trace: $stackTrace');
+      },
+      cancelOnError: false, // Don't stop listening on error
+    );
+    
     _bootstrap();
   }
 
@@ -61,6 +89,7 @@ class SessionController extends StateNotifier<SessionState> {
 
   Timer? _ticker;
   Timer? _connectionTimeoutTimer;
+  Timer? _healthCheckTimer;
   StreamSubscription<String>? _intentSubscription;
   StreamSubscription<VPNStage>? _stageSubscription;
   late final ProviderSubscription<SpeedTestState> _speedSubscription;
@@ -72,6 +101,7 @@ class SessionController extends StateNotifier<SessionState> {
   _PendingConnection? _pendingConnection;
   Server? _currentServer;
   bool _manualDisconnectInProgress = false;
+  bool _lastConnectionHealthy = true;
 
   void _log(String message) {
     debugPrint('[SessionController] $message');
@@ -107,12 +137,38 @@ class SessionController extends StateNotifier<SessionState> {
 
   Future<void> _bootstrap() async {
     try {
-      await _adService.initialize();
+      // CRITICAL FIX: Add timeout to ad service initialization
+      await _adService.initialize().timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {
+          _log('Ad service initialization timed out');
+        },
+      );
     } catch (error) {
-      debugPrint('Ad service initialization failed: $error');
+      _log('Ad service initialization failed: $error');
     }
-    _intentSubscription = _vpnPort.intentActions.listen(_handleIntentAction);
-    await _restoreSession();
+    
+    // CRITICAL FIX: Setup intent listener with error handling
+    _intentSubscription = _vpnPort.intentActions.listen(
+      _handleIntentAction,
+      onError: (error, stackTrace) {
+        _log('Intent action stream error: $error');
+      },
+      cancelOnError: false,
+    );
+    
+    // CRITICAL FIX: Add timeout to session restoration
+    try {
+      await _restoreSession().timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          _log('Session restoration timed out');
+        },
+      );
+    } catch (e) {
+      _log('Error restoring session: $e');
+    }
+    
     _startTicker();
     _pendingAutoConnect = true;
   }
@@ -178,6 +234,13 @@ class SessionController extends StateNotifier<SessionState> {
       }
     }
     
+    // Ignore unknown stage changes during transition phases - wait for explicit connected/disconnected
+    if (stage == VPNStage.unknown && 
+        (state.status == SessionStatus.connecting || state.status == SessionStatus.preparing)) {
+      _log('Ignoring unknown stage during connection attempt');
+      return;
+    }
+    
     // Add logging for all stage changes
     _log('VPN stage changed to: $stage');
   }
@@ -213,6 +276,9 @@ class SessionController extends StateNotifier<SessionState> {
   bool _stageIndicatesFailure(VPNStage stage) {
     switch (stage) {
       case VPNStage.unknown:
+        // Unknown is only a failure if we're not actively connecting
+        // During connection, we'll wait for explicit connected/disconnected signal
+        return state.status == SessionStatus.connected;
       case VPNStage.disconnected:
       case VPNStage.denied:
       case VPNStage.error:
@@ -243,6 +309,7 @@ class SessionController extends StateNotifier<SessionState> {
     );
     _activeMeta = meta;
     _currentServer = server;
+    _lastConnectionHealthy = true;
     state = state.copyWith(
       status: SessionStatus.connected,
       start: start,
@@ -368,16 +435,16 @@ class SessionController extends StateNotifier<SessionState> {
       errorMessage: null,
     );
 
-    try {
-      await _adService.unlock(duration: sessionDuration, context: context);
-    } catch (error) {
-      _log('Ad unlock failed: $error');
-      state = state.copyWith(
-        status: SessionStatus.disconnected,
-        errorMessage: 'Ad must be completed to connect.',
-      );
-      return;
-    }
+    // try {
+    //   await _adService.unlock(duration: sessionDuration, context: context);
+    // } catch (error) {
+    //   _log('Ad unlock failed: $error');
+    //   state = state.copyWith(
+    //     status: SessionStatus.disconnected,
+    //     errorMessage: 'Ad must be completed to connect.',
+    //   );
+    //   return;
+    // }
 
     final prepared = await _vpnPort.prepare();
     _log('VPN permission request result: $prepared');
@@ -457,7 +524,12 @@ class SessionController extends StateNotifier<SessionState> {
         await _notificationService.clear();
         state = state.copyWith(
           status: SessionStatus.error,
-          errorMessage: 'Unable to establish VPN connection. This could be due to server issues, network restrictions, or firewall settings. Please try another server or check your network settings.',
+          errorMessage: 'Connection failed. Possible causes:\n'
+              '• Server IP (18.212.249.64:1194) may be unreachable\n'
+              '• Firewall blocking VPN traffic\n'
+              '• EC2 security group not allowing UDP 1194\n'
+              '• Invalid OpenVPN configuration\n\n'
+              'Please verify your EC2 setup and try again.',
         );
         return;
       }
@@ -477,38 +549,82 @@ class SessionController extends StateNotifier<SessionState> {
     _log('disconnect() requested. Status: ${state.status}, userInitiated: $userInitiated');
     _manualDisconnectInProgress = true;
     _cancelConnectionTimeout();
+    _stopHealthCheck();
     try {
+      // Capture current state before any async operations
       final wasConnected = state.status == SessionStatus.connected;
-      final stats = wasConnected ? await _vpnPort.getTunnelStats() : <String, dynamic>{};
       final server = _resolveHistoryServer();
       final meta = state.meta;
       Duration? actualDuration;
+      
       if (wasConnected && meta != null) {
-        final nowMs = await _clock.elapsedRealtime();
-        final elapsedMs = nowMs - meta.startElapsedMs;
-        final clamped = elapsedMs.clamp(0, meta.durationMs) as num;
-        actualDuration = Duration(milliseconds: clamped.toInt());
+        try {
+          final nowMs = await _clock.elapsedRealtime();
+          final elapsedMs = nowMs - meta.startElapsedMs;
+          final clamped = elapsedMs.clamp(0, meta.durationMs) as num;
+          actualDuration = Duration(milliseconds: clamped.toInt());
+        } catch (e) {
+          _log('Error calculating duration: $e');
+        }
       }
+      
       _pendingConnection = null;
-      await _vpnPort.disconnect();
-      await _notificationService.clear();
-
-      if (wasConnected) {
-        final sessionForHistory = actualDuration != null
-            ? state.copyWith(duration: actualDuration)
-            : state;
-        await _settings.recordSessionEnd(
-          sessionForHistory,
-          server: server,
-          stats: stats,
-        );
-        await _clearPersistedState();
-      }
-
+      
+      // Update UI state FIRST - this must happen immediately
       _activeMeta = null;
       _currentServer = null;
       state = SessionState.initial();
       _applyQueuedServerSelection();
+      
+      // Now run the disconnect operations with timeout to prevent hanging
+      try {
+        await _vpnPort.disconnect().timeout(
+          const Duration(seconds: 5),
+          onTimeout: () {
+            _log('VPN disconnect timed out after 5 seconds');
+          },
+        );
+      } catch (e) {
+        _log('Error during VPN disconnect: $e');
+      }
+      
+      try {
+        await _notificationService.clear();
+      } catch (e) {
+        _log('Error clearing notifications: $e');
+      }
+      
+      // Run all remaining operations in background without awaiting
+      if (wasConnected) {
+        unawaited(
+          () async {
+            try {
+              final stats = await _vpnPort.getTunnelStats().timeout(
+                const Duration(seconds: 3),
+                onTimeout: () => <String, dynamic>{},
+              );
+              final sessionForHistory = actualDuration != null
+                  ? SessionState.initial().copyWith(duration: actualDuration)
+                  : SessionState.initial();
+              await _settings.recordSessionEnd(
+                sessionForHistory,
+                server: server,
+                stats: stats,
+              );
+              await _clearPersistedState();
+              _log('Session end recorded successfully');
+            } catch (e) {
+              _log('Error recording session end: $e');
+            }
+          }(),
+        );
+      }
+    } catch (e) {
+      _log('Unexpected error in disconnect: $e');
+      // Ensure state is updated even if there's an error
+      _activeMeta = null;
+      _currentServer = null;
+      state = SessionState.initial();
     } finally {
       _manualDisconnectInProgress = false;
     }
@@ -528,6 +644,7 @@ class SessionController extends StateNotifier<SessionState> {
 
   Future<void> _forceDisconnect({bool clearPrefs = false}) async {
     _cancelConnectionTimeout();
+    _stopHealthCheck();
     await _vpnPort.disconnect();
     if (clearPrefs) {
       await _clearPersistedMeta();
@@ -598,13 +715,75 @@ class SessionController extends StateNotifier<SessionState> {
       }
       final server = _currentServer;
       if (server != null) {
-        await _notificationService.updateSession(
-          server: server,
-          remaining: remaining,
-          state: state,
+        // CRITICAL FIX: Don't await notification updates - they block the UI thread
+        // Fire and forget with error handling to prevent UI freezing
+        unawaited(
+          _notificationService.updateSession(
+            server: server,
+            remaining: remaining,
+            state: state,
+          ).catchError((error) {
+            _log('Notification update failed (non-critical): $error');
+          }),
         );
       }
     });
+    _startHealthCheck();
+  }
+
+  void _startHealthCheck() {
+    _healthCheckTimer?.cancel();
+    _healthCheckTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (state.status != SessionStatus.connected) {
+        return;
+      }
+      
+      try {
+        // CRITICAL FIX: Add timeout to health check to prevent hanging
+        // If VPN service is unresponsive, timeout after 3 seconds
+        final isConnected = await _vpnPort.isConnected().timeout(
+          const Duration(seconds: 3),
+          onTimeout: () {
+            _log('Health check timeout: VPN service not responding');
+            return false;
+          },
+        );
+        
+        if (!isConnected && _lastConnectionHealthy) {
+          _log('Health check failed: VPN reports disconnected');
+          _lastConnectionHealthy = false;
+          // Wait a moment to see if it recovers
+          await Future.delayed(const Duration(seconds: 1));
+          
+          // CRITICAL FIX: Add timeout to recheck as well
+          final rechecked = await _vpnPort.isConnected().timeout(
+            const Duration(seconds: 3),
+            onTimeout: () {
+              _log('Health check recheck timeout');
+              return false;
+            },
+          );
+          
+          if (!rechecked) {
+            _log('Health check confirmed: VPN is disconnected, forcing disconnect');
+            await _handleRemoteDisconnect();
+          } else {
+            _lastConnectionHealthy = true;
+          }
+        } else if (isConnected) {
+          _lastConnectionHealthy = true;
+        }
+      } catch (e) {
+        _log('Health check error: $e');
+        // If health check throws, mark as unhealthy but don't disconnect yet
+        _lastConnectionHealthy = false;
+      }
+    });
+  }
+
+  void _stopHealthCheck() {
+    _healthCheckTimer?.cancel();
+    _healthCheckTimer = null;
   }
 
 
@@ -631,12 +810,12 @@ class SessionController extends StateNotifier<SessionState> {
       return;
     }
     state = state.copyWith(extendRequested: false);
-    try {
-      await _adService.unlock(duration: _extendDuration, context: context);
-      await extend(_extendDuration);
-    } catch (error) {
-      state = state.copyWith(errorMessage: error.toString());
-    }
+    // try {
+    //   await _adService.unlock(duration: _extendDuration, context: context);
+    //   await extend(_extendDuration);
+    // } catch (error) {
+    //   state = state.copyWith(errorMessage: error.toString());
+    // }
   }
 
   void requestExtension() {
@@ -661,15 +840,72 @@ class SessionController extends StateNotifier<SessionState> {
 
   @override
   void dispose() {
-    _cancelConnectionTimeout();
-    _ticker?.cancel();
-    _intentSubscription?.cancel();
-    _stageSubscription?.cancel();
-    _speedSubscription.close();
+    _log('SessionController dispose() called');
+    
+    // CRITICAL FIX: Ensure all timers are cancelled to prevent memory leaks and hanging
+    try {
+      _cancelConnectionTimeout();
+    } catch (e) {
+      _log('Error cancelling connection timeout: $e');
+    }
+    
+    try {
+      _stopHealthCheck();
+    } catch (e) {
+      _log('Error stopping health check: $e');
+    }
+    
+    try {
+      _ticker?.cancel();
+      _ticker = null;
+    } catch (e) {
+      _log('Error cancelling ticker: $e');
+    }
+    
+    // CRITICAL FIX: Cancel all stream subscriptions to prevent resource leaks
+    try {
+      _intentSubscription?.cancel();
+      _intentSubscription = null;
+    } catch (e) {
+      _log('Error cancelling intent subscription: $e');
+    }
+    
+    try {
+      _stageSubscription?.cancel();
+      _stageSubscription = null;
+    } catch (e) {
+      _log('Error cancelling stage subscription: $e');
+    }
+    
+    try {
+      _speedSubscription.close();
+    } catch (e) {
+      _log('Error closing speed subscription: $e');
+    }
+    
+    // Clear state
     _pendingConnection = null;
     _currentServer = null;
-    unawaited(_notificationService.clear());
+    _activeMeta = null;
+    _queuedServer = null;
+    
+    // CRITICAL FIX: Clear notifications with timeout to prevent hanging
+    unawaited(
+      _notificationService
+          .clear()
+          .timeout(
+            const Duration(seconds: 2),
+            onTimeout: () {
+              _log('Notification clear timeout');
+            },
+          )
+          .catchError((error) {
+            _log('Error clearing notifications: $error');
+          }),
+    );
+    
     super.dispose();
+    _log('SessionController dispose() completed');
   }
 
   Future<void> switchServer(Server server) async {

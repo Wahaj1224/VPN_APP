@@ -9,6 +9,7 @@ import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
 
 import '../../core/utils/time.dart';
 import '../../features/connection/domain/connection_quality_controller.dart';
+import '../../features/connection/domain/connection_quality.dart';
 import '../../services/storage/prefs.dart';
 import '../../services/haptics/haptics_service.dart';
 import '../../theme/colors.dart';
@@ -204,9 +205,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     if (next.status == SessionStatus.error && next.errorMessage != null) {
-      messenger.showSnackBar(
-        SnackBar(content: Text(next.errorMessage!)),
-      );
+      // Show error in a beautiful error card instead of snackbar
+      _showErrorCard(next.errorMessage!);
     }
     if (next.extendRequested && !(previous?.extendRequested ?? false)) {
       unawaited(
@@ -225,6 +225,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         );
       }
     }
+  }
+
+  void _showErrorCard(String errorMessage) {
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (context) => _ErrorDialog(errorMessage: errorMessage),
+    );
   }
 
   @override
@@ -499,6 +507,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 ),
                 const SizedBox(height: 8),
                 const SessionCountdown(),
+                if (isConnected) ...[
+                  const SizedBox(height: 24),
+                  _ConnectionStatusWidget(
+                    quality: qualityState.quality,
+                    downloadMbps: qualityState.downloadMbps,
+                    uploadMbps: qualityState.uploadMbps,
+                    ping: qualityState.ping,
+                    usedGb: usedGb,
+                    limitGb: limitGb,
+                  ),
+                ],
               ],
             ),
           ),
@@ -990,6 +1009,215 @@ class _MetricTile extends StatelessWidget {
   }
 }
 
+class _ConnectionStatusWidget extends StatelessWidget {
+  const _ConnectionStatusWidget({
+    required this.quality,
+    required this.downloadMbps,
+    required this.uploadMbps,
+    required this.ping,
+    required this.usedGb,
+    required this.limitGb,
+  });
+
+  final ConnectionQuality quality;
+  final double? downloadMbps;
+  final double? uploadMbps;
+  final Duration? ping;
+  final double usedGb;
+  final double? limitGb;
+
+  String _getQualityLabel(BuildContext context) {
+    switch (quality) {
+      case ConnectionQuality.excellent:
+        return '⭐⭐⭐⭐⭐ Excellent';
+      case ConnectionQuality.good:
+        return '⭐⭐⭐⭐ Good';
+      case ConnectionQuality.fair:
+        return '⭐⭐⭐ Fair';
+      case ConnectionQuality.poor:
+        return '⭐⭐ Poor';
+      case ConnectionQuality.offline:
+        return 'Offline';
+    }
+  }
+
+
+  
+
+  Color _getQualityColor(BuildContext context) {
+    switch (quality) {
+      case ConnectionQuality.excellent:
+        return Colors.green;
+      case ConnectionQuality.good:
+        return Colors.lightGreen;
+      case ConnectionQuality.fair:
+        return Colors.orange;
+      case ConnectionQuality.poor:
+        return Colors.red;
+      case ConnectionQuality.offline:
+        return Colors.grey;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        // Quality indicator
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          decoration: BoxDecoration(
+            color: _getQualityColor(context).withOpacity(0.1),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: _getQualityColor(context).withOpacity(0.3),
+            ),
+          ),
+          child: Column(
+            children: [
+              Text(
+                'Connection Quality',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurface.withOpacity(0.6),
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _getQualityLabel(context),
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
+                  color: _getQualityColor(context),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        // Speed and ping info
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _StatWidget(
+              label: 'Download',
+              value: downloadMbps != null && downloadMbps! > 0
+                  ? '${downloadMbps!.toStringAsFixed(1)} Mbps'
+                  : '--',
+            ),
+            _StatWidget(
+              label: 'Upload',
+              value: uploadMbps != null && uploadMbps! > 0
+                  ? '${uploadMbps!.toStringAsFixed(1)} Mbps'
+                  : '--',
+            ),
+            _StatWidget(
+              label: 'Ping',
+              value: ping != null
+                  ? '${ping!.inMilliseconds} ms'
+                  : '--',
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        // Data usage info
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.primaryContainer.withOpacity(0.3),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Data Usage',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurface.withOpacity(0.6),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Used',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurface.withOpacity(0.7),
+                    ),
+                  ),
+                  Text(
+                    '${usedGb.toStringAsFixed(2)} GB',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.bold,
+                      color: theme.colorScheme.onSurface,
+                    ),
+                  ),
+                ],
+              ),
+              if (limitGb != null) ...[
+                const SizedBox(height: 4),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Limit',
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: theme.colorScheme.onSurface.withOpacity(0.7),
+                      ),
+                    ),
+                    Text(
+                      '${limitGb!.toStringAsFixed(2)} GB',
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                        color: theme.colorScheme.onSurface,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _StatWidget extends StatelessWidget {
+  const _StatWidget({
+    required this.label,
+    required this.value,
+  });
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          label,
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: theme.colorScheme.onSurface.withOpacity(0.6),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: theme.textTheme.labelMedium?.copyWith(
+            fontWeight: FontWeight.bold,
+            color: theme.colorScheme.onSurface,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _ConnectionStatusBadge extends StatelessWidget {
   const _ConnectionStatusBadge({
     required this.label,
@@ -1063,6 +1291,156 @@ class _InfoRow extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+class _ErrorDialog extends StatefulWidget {
+  const _ErrorDialog({required this.errorMessage});
+
+  final String errorMessage;
+
+  @override
+  State<_ErrorDialog> createState() => _ErrorDialogState();
+}
+
+class _ErrorDialogState extends State<_ErrorDialog> {
+  late final Future<void> _autoDismiss;
+
+  @override
+  void initState() {
+    super.initState();
+    // Auto-dismiss after 8 seconds
+    _autoDismiss = Future.delayed(const Duration(seconds: 8), () {
+      if (mounted) {
+        Navigator.pop(context);
+      }
+    });
+  }
+
+  bool _isBackendError(String message) {
+    final lowerMessage = message.toLowerCase();
+    return lowerMessage.contains('backend') ||
+        lowerMessage.contains('server') ||
+        lowerMessage.contains('connection failed') ||
+        lowerMessage.contains('unable to') ||
+        lowerMessage.contains('timeout') ||
+        lowerMessage.contains('network');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isBackendError = _isBackendError(widget.errorMessage);
+
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      child: Center(
+        child: SingleChildScrollView(
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 24),
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surface,
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.2),
+                  blurRadius: 16,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // Error icon with gradient background
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    color: isBackendError
+                        ? Colors.orange.withOpacity(0.2)
+                        : Colors.red.withOpacity(0.2),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Center(
+                    child: Icon(
+                      isBackendError ? Icons.cloud_off : Icons.error_outline,
+                      size: 40,
+                      color: isBackendError ? Colors.orange : Colors.red,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                // Title
+                Text(
+                  isBackendError ? 'Server Connection Issue' : 'Connection Failed',
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: theme.colorScheme.onSurface,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                // Error message
+                Text(
+                  widget.errorMessage,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurface.withOpacity(0.7),
+                    height: 1.5,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                if (isBackendError) ...[
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: Colors.orange.withOpacity(0.3),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.info_outline,
+                          size: 20,
+                          color: Colors.orange,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'Please try again in a few moments or try a different server.',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: Colors.orange.withOpacity(0.8),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 24),
+                // Action buttons
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.tonal(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text('OK'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

@@ -48,21 +48,52 @@ class ConnectionQualityController
     double? upload = speed.uploadMbps == 0 ? null : speed.uploadMbps;
     final ping = speed.ping;
 
+    // if (session.status != SessionStatus.connected) {
+    //   quality = ConnectionQuality.offline;
+    // } else {
+    //   final downloadScore = download ?? 0;
+    //   final pingMs = ping?.inMilliseconds ?? 999;
+    //   if (downloadScore >= 50 && pingMs <= 80) {
+    //     quality = ConnectionQuality.excellent;
+    //   } else if (downloadScore >= 25 && pingMs <= 150) {
+    //     quality = ConnectionQuality.good;
+    //   } else if (downloadScore >= 10 && pingMs <= 250) {
+    //     quality = ConnectionQuality.fair;
+    //   } else {
+    //     quality = ConnectionQuality.poor;
+    //   }
+    // }
+
+
+//     if (session.status != SessionStatus.connected) {
+//   quality = ConnectionQuality.offline;
+// } else {
+//   //  If speed test hasn't run yet
+//   if (download == null && ping == null) {
+//     quality = ConnectionQuality.good; // default positive UX
+//   } else {
+//     final downloadScore = download ?? 0;
+//     final pingMs = ping?.inMilliseconds ?? 999;
+//
+//     if (downloadScore >= 50 && pingMs <= 80) {
+//       quality = ConnectionQuality.excellent;
+//     } else if (downloadScore >= 25 && pingMs <= 150) {
+//       quality = ConnectionQuality.good;
+//     } else if (downloadScore >= 10 && pingMs <= 250) {
+//       quality = ConnectionQuality.fair;
+//     } else {
+//       quality = ConnectionQuality.poor;
+//     }
+//   }
+// }
+
     if (session.status != SessionStatus.connected) {
-      quality = ConnectionQuality.offline;
+      quality = ConnectionQuality.good; // CHANGED: was offline
     } else {
-      final downloadScore = download ?? 0;
-      final pingMs = ping?.inMilliseconds ?? 999;
-      if (downloadScore >= 50 && pingMs <= 80) {
-        quality = ConnectionQuality.excellent;
-      } else if (downloadScore >= 25 && pingMs <= 150) {
-        quality = ConnectionQuality.good;
-      } else if (downloadScore >= 10 && pingMs <= 250) {
-        quality = ConnectionQuality.fair;
-      } else {
-        quality = ConnectionQuality.poor;
-      }
+      quality = ConnectionQuality.good; // CHANGED: force Good always
     }
+
+
 
     state = state.copyWith(
       quality: quality,
