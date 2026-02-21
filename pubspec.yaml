@@ -52,7 +52,6 @@ flutter:
   generate: true
   
   assets:
-    - assets/vpn/myserver.ovpn
     - assets/reference/
     - assets/CountryFlags/
     - assets/

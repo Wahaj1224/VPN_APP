@@ -7,18 +7,22 @@ import 'package:openvpn_flutter/openvpn_flutter.dart';
 
 import '../../../core/errors/app_error.dart';
 import '../../../core/utils/iterable_extensions.dart';
-import '../../../services/ads/rewarded_ad_service.dart';
+// Ads removed for unlimited sessions
 import '../../../services/notifications/session_notification_service.dart';
 import '../../../services/storage/prefs.dart';
 import '../../../services/time/session_clock.dart';
 import '../../../services/time/session_clock_provider.dart';
 import '../../../services/vpn/openvpn_port.dart';
+import '../../../services/vpn/softether_port.dart';
 import '../../../services/vpn/vpn_provider.dart';
+import '../../../services/vpn/vpn_selection_provider.dart';
 import '../../../services/vpn/models/vpn.dart';
+import '../../../services/vpn/models/vpn_type.dart';
 import '../../servers/domain/server.dart';
 import '../../servers/domain/server_providers.dart';
 import '../../settings/domain/settings_controller.dart';
-import '../../settings/domain/vpn_protocol.dart';
+import '../../../services/vpn/models/softether_config.dart';
+import '../../settings/domain/vpn_protocol.dart' as settings_vpn;
 import '../../speedtest/domain/speedtest_controller.dart';
 import '../../speedtest/domain/speedtest_state.dart';
 import '../../usage/data_usage_controller.dart';
@@ -27,7 +31,8 @@ import 'session_state.dart';
 import 'session_status.dart';
 
 const _sessionMetaPrefsKey = 'session_meta_v1';
-const sessionDuration = Duration(hours: 1);
+// Unlimited session duration (effectively 100 years of connection time)
+const sessionDuration = Duration(days: 36500);
 const _dataLimitMessage = 'Monthly data limit reached.';
 const _extendDuration = Duration(hours: 1);
 const _connectionTimeoutDuration = Duration(seconds: 60);
@@ -35,7 +40,7 @@ const _connectionTimeoutDuration = Duration(seconds: 60);
 class SessionController extends StateNotifier<SessionState> {
   SessionController(this._ref)
       : _vpnPort = _ref.read(openVpnPortProvider),
-        _adService = _ref.read(rewardedAdServiceProvider),
+        _softEtherPort = _ref.read(softEtherPortProvider),
         _clock = _ref.read(sessionClockProvider),
         _settings = _ref.read(settingsControllerProvider.notifier),
         _notificationService =
@@ -43,7 +48,7 @@ class SessionController extends StateNotifier<SessionState> {
         super(SessionState.initial()) {
     _speedSubscription =
         _ref.listen<SpeedTestState>(speedTestControllerProvider, _onSpeedUpdate);
-    
+
     // CRITICAL FIX: Initialize notification service with timeout to prevent hanging
     // Do this in background with error handling
     unawaited(
@@ -59,13 +64,13 @@ class SessionController extends StateNotifier<SessionState> {
             _log('Notification service initialization failed: $error');
           }),
     );
-    
-    // CRITICAL FIX: Setup stage stream listener with error handling
+
+    // CRITICAL FIX: Setup stage stream listeners for both OpenVPN and SoftEther
     // This prevents hanging if the stream throws or becomes stuck
     _stageSubscription = _vpnPort.stageStream.listen(
       (stage) {
         try {
-          unawaited(_handleVpnStage(stage));
+          unawaited(_handleVpnStage(stage as VPNStage));
         } catch (e) {
           _log('Error handling VPN stage: $e');
         }
@@ -74,15 +79,30 @@ class SessionController extends StateNotifier<SessionState> {
         _log('VPN stage stream error: $error');
         _log('Stack trace: $stackTrace');
       },
+    );
+
+    // Also listen to SoftEther port stage stream
+    _stageSubscription2 = _softEtherPort.stageStream.listen(
+      (stage) {
+        try {
+          unawaited(_handleVpnStage(stage as VPNStage));
+        } catch (e) {
+          _log('Error handling SoftEther stage: $e');
+        }
+      },
+      onError: (error, stackTrace) {
+        _log('SoftEther stage stream error: $error');
+        _log('Stack trace: $stackTrace');
+      },
       cancelOnError: false, // Don't stop listening on error
     );
-    
+
     _bootstrap();
   }
 
   final Ref _ref;
   final OpenVpnPort _vpnPort;
-  final RewardedAdService _adService;
+  final SoftEtherPort _softEtherPort;
   final SessionClock _clock;
   final SettingsController _settings;
   final SessionNotificationService _notificationService;
@@ -92,6 +112,7 @@ class SessionController extends StateNotifier<SessionState> {
   Timer? _healthCheckTimer;
   StreamSubscription<String>? _intentSubscription;
   StreamSubscription<VPNStage>? _stageSubscription;
+  StreamSubscription<VPNStage>? _stageSubscription2; // For SoftEther
   late final ProviderSubscription<SpeedTestState> _speedSubscription;
   int _reconnectAttempts = 0;
   bool _pendingAutoConnect = false;
@@ -101,7 +122,11 @@ class SessionController extends StateNotifier<SessionState> {
   _PendingConnection? _pendingConnection;
   Server? _currentServer;
   bool _manualDisconnectInProgress = false;
+  bool _disconnectInProgress = false;
   bool _lastConnectionHealthy = true;
+  Completer<void>? _ipFetchCompleter;
+  VpnProtocol? _activeVpnProtocol; // Track which VPN protocol is currently active
+  VPNStage? _lastVpnStage; // Track last stage to prevent duplicate processing
 
   void _log(String message) {
     debugPrint('[SessionController] $message');
@@ -136,18 +161,8 @@ class SessionController extends StateNotifier<SessionState> {
   }
 
   Future<void> _bootstrap() async {
-    try {
-      // CRITICAL FIX: Add timeout to ad service initialization
-      await _adService.initialize().timeout(
-        const Duration(seconds: 3),
-        onTimeout: () {
-          _log('Ad service initialization timed out');
-        },
-      );
-    } catch (error) {
-      _log('Ad service initialization failed: $error');
-    }
-    
+    // Ads removed — no initialization required
+
     // CRITICAL FIX: Setup intent listener with error handling
     _intentSubscription = _vpnPort.intentActions.listen(
       _handleIntentAction,
@@ -156,7 +171,7 @@ class SessionController extends StateNotifier<SessionState> {
       },
       cancelOnError: false,
     );
-    
+
     // CRITICAL FIX: Add timeout to session restoration
     try {
       await _restoreSession().timeout(
@@ -168,7 +183,7 @@ class SessionController extends StateNotifier<SessionState> {
     } catch (e) {
       _log('Error restoring session: $e');
     }
-    
+
     _startTicker();
     _pendingAutoConnect = true;
   }
@@ -197,6 +212,16 @@ class SessionController extends StateNotifier<SessionState> {
 
   Future<void> _handleVpnStage(VPNStage stage) async {
     _log('VPN stage update: $stage');
+    
+    // CRITICAL FIX: Prevent duplicate stage processing
+    if (_lastVpnStage == stage && stage == VPNStage.disconnected) {
+      _log('⏭️ Skipping duplicate disconnected stage');
+      return;
+    }
+    if (stage != VPNStage.unknown) {
+      _lastVpnStage = stage;
+    }
+    
     if (_manualDisconnectInProgress) {
       if (stage == VPNStage.disconnected) {
         _manualDisconnectInProgress = false;
@@ -233,14 +258,14 @@ class SessionController extends StateNotifier<SessionState> {
         await _handleRemoteDisconnect();
       }
     }
-    
+
     // Ignore unknown stage changes during transition phases - wait for explicit connected/disconnected
-    if (stage == VPNStage.unknown && 
+    if (stage == VPNStage.unknown &&
         (state.status == SessionStatus.connecting || state.status == SessionStatus.preparing)) {
       _log('Ignoring unknown stage during connection attempt');
       return;
     }
-    
+
     // Add logging for all stage changes
     _log('VPN stage changed to: $stage');
   }
@@ -299,6 +324,120 @@ class SessionController extends StateNotifier<SessionState> {
     final server = pending.server;
     final start = DateTime.now().toUtc();
     final publicIp = pending.initialIp;
+
+    // For SoftEther, server may be null
+    if (server == null) {
+      _log('Completing SoftEther connection (no server object)');
+      
+      // For SoftEther, verify the connection is valid before proceeding
+      final selectedVpnType = _ref.read(selectedVpnTypeProvider);
+      if (selectedVpnType == VpnType.softEther) {
+        // CRITICAL FIX: The tunnel takes time to establish
+        // Wait for tunnel establishment attempt to complete (typically 5-7 seconds)
+        // Then verify the actual tunneled connection status
+        _log('⏳ Waiting 7 seconds for SoftEther tunnel establishment to complete...');
+        await Future.delayed(const Duration(seconds: 7));
+        
+        // Now check if the tunnel actually established
+        final stillConnected = await _softEtherPort.isConnected();
+        _log('🔍 SoftEther tunnel verification after 7 seconds: $stillConnected');
+        
+        if (!stillConnected) {
+          _log('❌ SoftEther tunnel connection failed - aborting completion');
+          state = state.copyWith(
+            status: SessionStatus.error,
+            errorMessage: 'SoftEther VPN tunnel failed to establish. The server may be unreachable or not properly configured.',
+          );
+          await _notificationService.clear();
+          return;
+        }
+      }
+      
+      // Create meta for SoftEther (CRITICAL FIX)
+      final softEtherMeta = SessionMeta(
+        serverId: 'softether-vpn',
+        serverName: 'SoftEther VPN',
+        countryCode: 'SE',
+        startElapsedMs: pending.startElapsedMs,
+        durationMs: sessionDuration.inMilliseconds,
+        publicIp: publicIp,
+      );
+      
+      state = state.copyWith(
+        status: SessionStatus.connected,
+        start: start,
+        duration: sessionDuration,
+        startElapsedMs: pending.startElapsedMs,
+        serverId: 'softether-vpn',
+        serverName: 'SoftEther VPN',
+        countryCode: 'SE',
+        publicIp: publicIp,
+        expired: false,
+        sessionLocked: true,
+        meta: softEtherMeta,
+        errorMessage: null,
+      );
+      
+      // Store meta and set as active
+      _activeMeta = softEtherMeta;
+      _lastConnectionHealthy = true;
+      await _persistMeta(softEtherMeta);
+      
+      // Trigger IP fetch in background for SoftEther
+      _ipFetchCompleter = Completer<void>();
+      unawaited(
+        () async {
+          try {
+            // We've already waited 7 seconds for tunnel establishment in _completePendingConnection()
+            // Now attempt to fetch the new IP through the tunnel
+            _log('🔄 Attempting to fetch new IP after SoftEther tunnel established');
+            
+            // Try fetching IP multiple times with longer delays
+            for (int attempt = 1; attempt <= 5; attempt++) {
+              // Check if cancelled between attempts
+              if (_ipFetchCompleter!.isCompleted) {
+                _log('IP fetch cancelled during attempt $attempt');
+                return;
+              }
+              
+              try {
+                _log('📡 IP fetch attempt $attempt/5...');
+                final speedController = _ref.read(speedTestControllerProvider.notifier);
+                await speedController.run();
+                
+                final newState = _ref.read(speedTestControllerProvider);
+                final newIp = newState.ip;
+                _log('✅ IP fetch attempt $attempt: $newIp');
+                
+                if (newIp != null && newIp.isNotEmpty) {
+                  // Successfully fetched IP
+                  _log('🎉 Successfully retrieved IP: $newIp via SoftEther VPN proxy');
+                  break;
+                }
+              } catch (e) {
+                _log('⚠️ IP fetch attempt $attempt failed: $e');
+              }
+              
+              // Wait before retry with increasing delays
+              if (attempt < 5) {
+                final delaySeconds = 2 + (attempt * 1);
+                _log('⏳ Waiting ${delaySeconds}s before next IP fetch attempt...');
+                await Future.delayed(Duration(seconds: delaySeconds));
+              }
+            }
+          } catch (e) {
+            _log('Error refreshing IP after SoftEther connection: $e');
+          } finally {
+            if (!_ipFetchCompleter!.isCompleted) {
+              _ipFetchCompleter!.complete();
+            }
+          }
+        }(),
+      );
+      
+      return;
+    }
+
     final meta = SessionMeta(
       serverId: server.id,
       serverName: server.name,
@@ -377,8 +516,17 @@ class SessionController extends StateNotifier<SessionState> {
         startElapsedMs: meta.startElapsedMs,
         duration: meta.duration,
       );
-      final connected = await _vpnPort.isConnected();
-      if (!connected || remaining == Duration.zero) {
+      // Check both VPN ports (OpenVPN and SoftEther). Treat as connected if either reports connected.
+      final connectedOpen = await _vpnPort.isConnected().timeout(
+            const Duration(seconds: 3),
+            onTimeout: () => false,
+          );
+      final connectedSoft = await _softEtherPort.isConnected().timeout(
+            const Duration(seconds: 3),
+            onTimeout: () => false,
+          );
+      final connected = connectedOpen || connectedSoft;
+      if (!connected) {
         await _forceDisconnect(clearPrefs: true);
         return;
       }
@@ -407,12 +555,30 @@ class SessionController extends StateNotifier<SessionState> {
 
   Future<void> connect({
     required BuildContext context,
-    required Server server,
+    required Server? server,
   }) async {
-    _log('connect() requested for ${server.name} (${server.countryCode})');
+    final selectedVpnType = _ref.read(selectedVpnTypeProvider);
+    _log('connect() requested for ${server?.name ?? "SoftEther"} (${server?.countryCode ?? "N/A"}), VPN Type: $selectedVpnType');
+
     if (state.status == SessionStatus.connected) {
       throw const AppError('Already connected.');
     }
+
+    // Route to appropriate VPN type handler
+    if (selectedVpnType == VpnType.softEther) {
+      _activeVpnProtocol = null; // SoftEther uses native service, not a VPN protocol
+      await _connectSoftEther();
+    } else {
+      if (server == null) {
+        throw const AppError('Server is required for OpenVPN connections.');
+      }
+      _activeVpnProtocol = VpnProtocol.openvpn;
+      await _connectOpenVpn(server);
+    }
+  }
+
+  Future<void> _connectOpenVpn(Server server) async {
+    _log('Connecting via OpenVPN to ${server.name} (${server.countryCode})');
     if (!_vpnPort.isSupported) {
       _log('Device does not support VPN');
       state = state.copyWith(
@@ -435,17 +601,6 @@ class SessionController extends StateNotifier<SessionState> {
       errorMessage: null,
     );
 
-    // try {
-    //   await _adService.unlock(duration: sessionDuration, context: context);
-    // } catch (error) {
-    //   _log('Ad unlock failed: $error');
-    //   state = state.copyWith(
-    //     status: SessionStatus.disconnected,
-    //     errorMessage: 'Ad must be completed to connect.',
-    //   );
-    //   return;
-    // }
-
     final prepared = await _vpnPort.prepare();
     _log('VPN permission request result: $prepared');
     if (!prepared) {
@@ -457,7 +612,7 @@ class SessionController extends StateNotifier<SessionState> {
     }
 
     state = state.copyWith(status: SessionStatus.connecting);
-    _log('Connecting to VPN ${server.name} (${server.countryCode})');
+    _log('Connecting to OpenVPN server: ${server.name}');
 
     try {
       final initialIp = _ref.read(speedTestControllerProvider).ip;
@@ -513,9 +668,7 @@ class SessionController extends StateNotifier<SessionState> {
       await _notificationService.showConnecting(server);
       _startConnectionTimeout();
 
-      _log('Attempting to connect to VPN server: ${vpnServer.hostName}, IP: ${vpnServer.ip}');
-      _log('Config length: ${vpnServer.openVpnConfig.length}');
-      
+      _log('Attempting to connect to OpenVPN server: ${vpnServer.hostName}');
       final connected = await _vpnPort.connect(vpnServer);
       _log('OpenVPN connect() returned $connected');
       if (!connected) {
@@ -525,16 +678,16 @@ class SessionController extends StateNotifier<SessionState> {
         state = state.copyWith(
           status: SessionStatus.error,
           errorMessage: 'Connection failed. Possible causes:\n'
-              '• Server IP (18.212.249.64:1194) may be unreachable\n'
+              '• Server IP may be unreachable\n'
               '• Firewall blocking VPN traffic\n'
-              '• EC2 security group not allowing UDP 1194\n'
+              '• Security group not allowing port\n'
               '• Invalid OpenVPN configuration\n\n'
-              'Please verify your EC2 setup and try again.',
+              'Please verify your setup and try again.',
         );
         return;
       }
     } catch (e) {
-      _log('Connection error: $e');
+      _log('OpenVPN Connection error: $e');
       _cancelConnectionTimeout();
       _pendingConnection = null;
       await _notificationService.clear();
@@ -545,7 +698,158 @@ class SessionController extends StateNotifier<SessionState> {
     }
   }
 
+  Future<void> _connectSoftEther() async {
+    _log('🔄 Starting SoftEther VPN connection process');
+
+    final softEtherConfig = _ref.read(softEtherConfigProvider);
+    if (softEtherConfig == null || !softEtherConfig.isValid) {
+      _log('❌ Invalid SoftEther configuration');
+      state = state.copyWith(
+        status: SessionStatus.error,
+        errorMessage: 'SoftEther configuration is not set or invalid. Please review your settings.',
+      );
+      return;
+    }
+
+    // SPECIAL HANDLING FOR L2TP/IPSec: Cannot connect programmatically on Android
+    if (softEtherConfig.protocol == VpnProtocol.l2tpIpsec) {
+      _log('🔒 L2TP/IPSec detected - showing setup dialog');
+      // Instead of error, we'll show a setup dialog that helps user configure VPN
+      // This will be handled by the UI layer
+      state = state.copyWith(
+        status: SessionStatus.error,
+        errorMessage: 'L2TP_IPSEC_SETUP:${softEtherConfig.connectionName}:${softEtherConfig.serverAddress}:${softEtherConfig.presharedKey ?? ""}:${softEtherConfig.username}:${softEtherConfig.password}',
+      );
+      return;
+    }
+
+    if (!_softEtherPort.isSupported) {
+      _log('❌ SoftEther not supported on this device');
+      state = state.copyWith(
+        status: SessionStatus.error,
+        errorMessage: 'SoftEther VPN is not supported on this device.',
+      );
+      return;
+    }
+
+    _log('🔧 Preparing SoftEther VPN connection');
+    state = state.copyWith(
+      status: SessionStatus.preparing,
+      errorMessage: null,
+    );
+
+    final prepared = await _softEtherPort.prepare();
+    _log('✅ SoftEther permission request result: $prepared');
+    if (!prepared) {
+      _log('❌ VPN permission denied');
+      state = state.copyWith(
+        status: SessionStatus.error,
+        errorMessage: 'VPN permission required.',
+      );
+      return;
+    }
+
+    _log('🚀 Connecting to SoftEther server');
+    state = state.copyWith(status: SessionStatus.connecting);
+    _log('📡 Connecting to SoftEther: ${softEtherConfig.connectionName}');
+
+    try {
+      final initialIp = _ref.read(speedTestControllerProvider).ip;
+      final startElapsed = await _clock.elapsedRealtime();
+
+      // Check if this server has OpenVPN config available
+      // If so, suggest using OpenVPN for real tunneling
+      final catalog = _ref.read(serverCatalogProvider);
+      final matchingServer = catalog.servers.firstWhereOrNull((s) {
+        final addr = softEtherConfig.serverAddress.toLowerCase();
+        final endpoints = [s.endpoint, s.ip, s.hostName, s.name]
+            .whereType<String>()
+            .map((e) => e.toLowerCase())
+            .toList();
+        return endpoints.contains(addr);
+      });
+
+      if (matchingServer != null && 
+          (matchingServer.openVpnConfigDataBase64?.isNotEmpty ?? false)) {
+        _log('🎯 Found OpenVPN config for server - routing to OpenVPN for real tunnel');
+        _log('💡 This will provide actual IP change and real VPN tunnel');
+        await _connectOpenVpn(matchingServer);
+        return;
+      }
+
+      _log('🔍 No OpenVPN fallback found - using native SoftEther client');
+      _log('⚠️ Note: Real IP change requires native L2TP/IPSec tunnel to be established');
+
+      // Set up pending connection for SoftEther (no server object needed)
+      _pendingConnection = _PendingConnection(
+        server: null, // SoftEther doesn't use a server object
+        startElapsedMs: startElapsed,
+        initialIp: initialIp,
+      );
+
+      // Show notification
+      await _notificationService.showConnecting(
+        softEtherConfig.connectionName,
+      );
+
+      _startConnectionTimeout();
+
+      // Attempt native SoftEther connection
+      // Auto-correct common port/protocol mismatches:
+      // - If user selected L2TP/IPSec but left default port 5555, switch to standard L2TP port 1701.
+      // - If port 5555 is used but protocol isn't SoftEther, prefer SoftEther protocol (5555 is SoftEther native port).
+      SoftEtherConfig adjustedConfig = softEtherConfig;
+      if (softEtherConfig.protocol == VpnProtocol.l2tpIpsec && softEtherConfig.serverPort == 5555) {
+        _log('🔧 Detected L2TP/IPSec with port 5555 — adjusting port to 1701 for L2TP/IPSec');
+        adjustedConfig = softEtherConfig.copyWith(serverPort: 1701);
+      } else if (softEtherConfig.serverPort == 5555 && softEtherConfig.protocol != VpnProtocol.softEther) {
+        _log('🔧 Server port 5555 commonly indicates native SoftEther protocol — switching protocol to SoftEther');
+        adjustedConfig = softEtherConfig.copyWith(protocol: VpnProtocol.softEther);
+      }
+
+      _log('🌐 Attempting to connect to SoftEther server: ${adjustedConfig.serverAddress}:${adjustedConfig.serverPort} (protocol: ${adjustedConfig.protocol})');
+      final connected = await _softEtherPort.connectSoftEther(adjustedConfig).timeout(
+        const Duration(seconds: 15),
+        onTimeout: () {
+          _log('⏰ SoftEther connection attempt timed out after 15 seconds');
+          return false;
+        },
+      );
+      _log('📊 SoftEther connectSoftEther() returned $connected');
+
+      if (!connected) {
+        _log('❌ SoftEther connection failed');
+        _cancelConnectionTimeout();
+        _pendingConnection = null;
+        await _notificationService.clear();
+        state = state.copyWith(
+          status: SessionStatus.error,
+          errorMessage: 'Failed to establish SoftEther VPN connection. Please check your configuration and network settings.',
+        );
+        return;
+      }
+
+      // Connection successful, stream listener will handle the rest via _stageSubscription2
+      _log('✅ SoftEther connection initiated successfully');
+    } catch (e) {
+      _log('💥 SoftEther Connection error: $e');
+      _cancelConnectionTimeout();
+      _pendingConnection = null;
+      await _notificationService.clear();
+      state = state.copyWith(
+        status: SessionStatus.error,
+        errorMessage: 'Unable to establish SoftEther tunnel: ${e.toString()}',
+      );
+    }
+  }
+
   Future<void> disconnect({bool userInitiated = true}) async {
+    if (_disconnectInProgress) {
+      _log('disconnect() already in progress, ignoring');
+      return;
+    }
+    _disconnectInProgress = true;
+    
     _log('disconnect() requested. Status: ${state.status}, userInitiated: $userInitiated');
     _manualDisconnectInProgress = true;
     _cancelConnectionTimeout();
@@ -556,7 +860,7 @@ class SessionController extends StateNotifier<SessionState> {
       final server = _resolveHistoryServer();
       final meta = state.meta;
       Duration? actualDuration;
-      
+
       if (wasConnected && meta != null) {
         try {
           final nowMs = await _clock.elapsedRealtime();
@@ -567,52 +871,82 @@ class SessionController extends StateNotifier<SessionState> {
           _log('Error calculating duration: $e');
         }
       }
-      
+
       _pendingConnection = null;
-      
+
       // Update UI state FIRST - this must happen immediately
       _activeMeta = null;
       _currentServer = null;
       state = SessionState.initial();
       _applyQueuedServerSelection();
-      
+
+      // Determine which VPN type was connected and disconnect appropriately
+      final selectedVpnType = _ref.read(selectedVpnTypeProvider);
+
       // Now run the disconnect operations with timeout to prevent hanging
       try {
-        await _vpnPort.disconnect().timeout(
-          const Duration(seconds: 5),
-          onTimeout: () {
-            _log('VPN disconnect timed out after 5 seconds');
-          },
-        );
+        if (selectedVpnType == VpnType.softEther) {
+          _log('Disconnecting SoftEther VPN');
+          await _softEtherPort.disconnect().timeout(
+            const Duration(seconds: 5),
+            onTimeout: () {
+              _log('SoftEther disconnect timed out after 5 seconds');
+            },
+          );
+        } else {
+          _log('Disconnecting OpenVPN');
+          await _vpnPort.disconnect().timeout(
+            const Duration(seconds: 5),
+            onTimeout: () {
+              _log('VPN disconnect timed out after 5 seconds');
+            },
+          );
+        }
       } catch (e) {
         _log('Error during VPN disconnect: $e');
+        // Don't rethrow - we still want to clean up state
       }
-      
+
       try {
         await _notificationService.clear();
       } catch (e) {
         _log('Error clearing notifications: $e');
       }
-      
+
       // Run all remaining operations in background without awaiting
       if (wasConnected) {
         unawaited(
           () async {
             try {
-              final stats = await _vpnPort.getTunnelStats().timeout(
-                const Duration(seconds: 3),
-                onTimeout: () => <String, dynamic>{},
-              );
-              final sessionForHistory = actualDuration != null
-                  ? SessionState.initial().copyWith(duration: actualDuration)
-                  : SessionState.initial();
-              await _settings.recordSessionEnd(
-                sessionForHistory,
-                server: server,
-                stats: stats,
-              );
+              final stats = selectedVpnType == VpnType.softEther
+                  ? await _softEtherPort.getTunnelStats().timeout(
+                      const Duration(seconds: 3),
+                      onTimeout: () => <String, dynamic>{},
+                    )
+                  : await _vpnPort.getTunnelStats().timeout(
+                      const Duration(seconds: 3),
+                      onTimeout: () => <String, dynamic>{},
+                    );
+              
+              // CRITICAL FIX: Only record session if we have valid metadata with start time
+              if (meta != null && actualDuration != null) {
+                // Reconstruct the session with proper start time from meta
+                final wallStartTime = DateTime.now().toUtc().subtract(actualDuration);
+                final sessionForHistory = SessionState.initial().copyWith(
+                  start: wallStartTime,
+                  duration: actualDuration,
+                );
+                await _settings.recordSessionEnd(
+                  sessionForHistory,
+                  server: server,
+                  stats: stats,
+                );
+                _log('Session end recorded successfully');
+              } else {
+                _log('⏭️ Skipping session recording - missing meta or invalid duration');
+              }
+              
               await _clearPersistedState();
-              _log('Session end recorded successfully');
             } catch (e) {
               _log('Error recording session end: $e');
             }
@@ -627,6 +961,7 @@ class SessionController extends StateNotifier<SessionState> {
       state = SessionState.initial();
     } finally {
       _manualDisconnectInProgress = false;
+      _disconnectInProgress = false;
     }
   }
 
@@ -645,16 +980,31 @@ class SessionController extends StateNotifier<SessionState> {
   Future<void> _forceDisconnect({bool clearPrefs = false}) async {
     _cancelConnectionTimeout();
     _stopHealthCheck();
-    await _vpnPort.disconnect();
+    _cancelIpFetch();
+    
+    // CRITICAL FIX: Only disconnect the active VPN - don't call both!
+    final protocol = _activeVpnProtocol;
+    if (protocol == null) {
+      // SoftEther doesn't use a VPN protocol - it uses native service
+      _log('Disconnecting SoftEther native service');
+      await _softEtherPort.disconnect();
+    } else {
+      // OpenVPN uses the VPN port
+      _log('Disconnecting OpenVPN service');
+      await _vpnPort.disconnect();
+    }
+    
     if (clearPrefs) {
       await _clearPersistedMeta();
     }
     _activeMeta = null;
     _pendingConnection = null;
+    _activeVpnProtocol = null;
     await _notificationService.clear();
     _currentServer = null;
     _manualDisconnectInProgress = false;
-    state = SessionState.initial().copyWith(expired: true, sessionLocked: false);
+    // Only mark as expired if session actually timed out - not for normal disconnects
+    state = SessionState.initial().copyWith(expired: false, sessionLocked: false);
     _applyQueuedServerSelection();
   }
 
@@ -699,10 +1049,11 @@ class SessionController extends StateNotifier<SessionState> {
         startElapsedMs: state.startElapsedMs!,
         duration: state.duration!,
       );
-      if (remaining <= Duration.zero) {
-        await _forceDisconnect(clearPrefs: true);
-        return;
-      }
+      // Session duration is unlimited - don't force disconnect
+      // if (remaining <= Duration.zero) {
+      //   await _forceDisconnect(clearPrefs: true);
+      //   return;
+      // }
       await _ref.read(dataUsageControllerProvider.notifier).recordTickUsage();
       final usage = _ref.read(dataUsageControllerProvider);
       if (usage.limitExceeded) {
@@ -737,34 +1088,51 @@ class SessionController extends StateNotifier<SessionState> {
       if (state.status != SessionStatus.connected) {
         return;
       }
-      
+
       try {
         // CRITICAL FIX: Add timeout to health check to prevent hanging
         // If VPN service is unresponsive, timeout after 3 seconds
-        final isConnected = await _vpnPort.isConnected().timeout(
+        // Check both ports for health — consider connection healthy if either port reports connected
+        final isConnectedOpen = await _vpnPort.isConnected().timeout(
           const Duration(seconds: 3),
           onTimeout: () {
             _log('Health check timeout: VPN service not responding');
             return false;
           },
         );
-        
+        final isConnectedSoft = await _softEtherPort.isConnected().timeout(
+          const Duration(seconds: 3),
+          onTimeout: () {
+            _log('Health check timeout: SoftEther service not responding');
+            return false;
+          },
+        );
+
+        final isConnected = isConnectedOpen || isConnectedSoft;
+
         if (!isConnected && _lastConnectionHealthy) {
           _log('Health check failed: VPN reports disconnected');
           _lastConnectionHealthy = false;
           // Wait a moment to see if it recovers
           await Future.delayed(const Duration(seconds: 1));
-          
+
           // CRITICAL FIX: Add timeout to recheck as well
-          final rechecked = await _vpnPort.isConnected().timeout(
+          final recheckedOpen = await _vpnPort.isConnected().timeout(
             const Duration(seconds: 3),
             onTimeout: () {
               _log('Health check recheck timeout');
               return false;
             },
           );
-          
-          if (!rechecked) {
+          final recheckedSoft = await _softEtherPort.isConnected().timeout(
+            const Duration(seconds: 3),
+            onTimeout: () {
+              _log('Health check recheck timeout (SoftEther)');
+              return false;
+            },
+          );
+
+          if (!(recheckedOpen || recheckedSoft)) {
             _log('Health check confirmed: VPN is disconnected, forcing disconnect');
             await _handleRemoteDisconnect();
           } else {
@@ -786,6 +1154,14 @@ class SessionController extends StateNotifier<SessionState> {
     _healthCheckTimer = null;
   }
 
+  void _cancelIpFetch() {
+    if (_ipFetchCompleter != null && !_ipFetchCompleter!.isCompleted) {
+      _ipFetchCompleter!.complete();
+      _log('Cancelled ongoing IP fetch operation');
+    }
+    _ipFetchCompleter = null;
+  }
+
 
 
   Future<void> autoConnectIfEnabled({required BuildContext context}) async {
@@ -795,13 +1171,28 @@ class SessionController extends StateNotifier<SessionState> {
     if (!settings.autoConnect.connectOnLaunch) {
       return;
     }
-    final server = _ref.read(selectedServerProvider);
-    if (server == null) {
-      return;
+    
+    final selectedVpnType = _ref.read(selectedVpnTypeProvider);
+    
+    // Check if we have valid configuration for the selected VPN type
+    if (selectedVpnType == VpnType.softEther) {
+      final softEtherConfig = _ref.read(softEtherConfigProvider);
+      if (softEtherConfig == null || !softEtherConfig.isValid) {
+        return;
+      }
+    } else {
+      // For OpenVPN, check if a server is selected
+      final server = _ref.read(selectedServerProvider);
+      if (server == null) {
+        return;
+      }
     }
+    
     if (state.status == SessionStatus.connected) {
       return;
     }
+    
+    final server = _ref.read(selectedServerProvider);
     await connect(context: context, server: server);
   }
 
@@ -841,27 +1232,33 @@ class SessionController extends StateNotifier<SessionState> {
   @override
   void dispose() {
     _log('SessionController dispose() called');
-    
+
     // CRITICAL FIX: Ensure all timers are cancelled to prevent memory leaks and hanging
     try {
       _cancelConnectionTimeout();
     } catch (e) {
       _log('Error cancelling connection timeout: $e');
     }
-    
+
     try {
       _stopHealthCheck();
     } catch (e) {
       _log('Error stopping health check: $e');
     }
-    
+
+    try {
+      _cancelIpFetch();
+    } catch (e) {
+      _log('Error cancelling IP fetch: $e');
+    }
+
     try {
       _ticker?.cancel();
       _ticker = null;
     } catch (e) {
       _log('Error cancelling ticker: $e');
     }
-    
+
     // CRITICAL FIX: Cancel all stream subscriptions to prevent resource leaks
     try {
       _intentSubscription?.cancel();
@@ -869,26 +1266,33 @@ class SessionController extends StateNotifier<SessionState> {
     } catch (e) {
       _log('Error cancelling intent subscription: $e');
     }
-    
+
     try {
       _stageSubscription?.cancel();
       _stageSubscription = null;
     } catch (e) {
       _log('Error cancelling stage subscription: $e');
     }
-    
+
+    try {
+      _stageSubscription2?.cancel();
+      _stageSubscription2 = null;
+    } catch (e) {
+      _log('Error cancelling stage subscription 2 (SoftEther): $e');
+    }
+
     try {
       _speedSubscription.close();
     } catch (e) {
       _log('Error closing speed subscription: $e');
     }
-    
+
     // Clear state
     _pendingConnection = null;
     _currentServer = null;
     _activeMeta = null;
     _queuedServer = null;
-    
+
     // CRITICAL FIX: Clear notifications with timeout to prevent hanging
     unawaited(
       _notificationService
@@ -903,7 +1307,7 @@ class SessionController extends StateNotifier<SessionState> {
             _log('Error clearing notifications: $error');
           }),
     );
-    
+
     super.dispose();
     _log('SessionController dispose() completed');
   }
@@ -928,7 +1332,7 @@ class _PendingConnection {
     required this.initialIp,
   });
 
-  final Server server;
+  final Server? server;
   final int startElapsedMs;
   final String? initialIp;
 }

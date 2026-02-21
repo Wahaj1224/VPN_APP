@@ -92,10 +92,19 @@ class SessionNotificationService {
     return true;
   }
 
-  Future<void> showConnecting(Server server) async {
+  Future<void> showConnecting(dynamic serverOrName) async {
     if (!_initialized) return;
-    _currentServerId = server.id;
-    final title = 'Connecting to ${_displayName(server)}';
+    
+    String title;
+    if (serverOrName is Server) {
+      _currentServerId = serverOrName.id;
+      title = 'Connecting to ${_displayName(serverOrName)}';
+    } else if (serverOrName is String) {
+      title = 'Connecting to $serverOrName';
+    } else {
+      title = 'Connecting...';
+    }
+    
     const body = 'Negotiating secure tunnel...';
 
     await _plugin.show(

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../services/vpn/models/softether_config.dart';
 import '../../../services/storage/prefs.dart';
 import '../domain/auto_connect_rules.dart';
 import '../domain/protocol_config.dart';
@@ -18,6 +19,8 @@ class SettingsRepository {
   static const _batterySaverKey = 'settings_battery_saver';
   static const _networkQualityKey = 'settings_network_quality';
   static const _appearanceAccentKey = 'settings_accent';
+  static const _vpnTypeKey = 'settings_vpn_type';
+  static const _softEtherConfigKey = 'settings_softether_config';
 
   ProtocolConfig loadProtocol() {
     final jsonString = _prefs.getString(_protocolKey);
@@ -64,6 +67,30 @@ class SettingsRepository {
 
   Future<void> saveAccent(String name) =>
       _prefs.setString(_appearanceAccentKey, name);
+
+  String? loadVpnType() => _prefs.getString(_vpnTypeKey);
+
+  Future<void> saveVpnType(String type) =>
+      _prefs.setString(_vpnTypeKey, type);
+
+  SoftEtherConfig? loadSoftEtherConfig() {
+    final jsonString = _prefs.getString(_softEtherConfigKey);
+    if (jsonString == null) return null;
+    try {
+      final json = jsonDecode(jsonString) as Map<String, dynamic>;
+      return SoftEtherConfig.fromJson(json);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveSoftEtherConfig(SoftEtherConfig config) async {
+    await _prefs.setString(_softEtherConfigKey, jsonEncode(config.toJson()));
+  }
+
+  Future<void> clearSoftEtherConfig() async {
+    await _prefs.remove(_softEtherConfigKey);
+  }
 
   Map<String, dynamic>? _decode(String? jsonString) {
     if (jsonString == null) return null;

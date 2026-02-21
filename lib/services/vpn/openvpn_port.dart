@@ -206,6 +206,7 @@ class OpenVpnPort implements VpnPort {
           );
         } catch (e) {
           debugPrint('[OpenVpnPort] Error calling engine.disconnect(): $e');
+          // Continue with cleanup even if disconnect fails
         }
       }
       _isConnected = false;

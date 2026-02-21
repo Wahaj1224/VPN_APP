@@ -122,6 +122,10 @@ class SettingsController extends StateNotifier<SettingsState> {
   Future<void> recordSessionEnd(SessionState session,
       {required Server? server, required Map<String, dynamic> stats}) async {
     if (server == null) return;
+    if (session.start == null) {
+      // Cannot record session without valid start time
+      return;
+    }
     final history = _ref.read(connectionHistoryProvider.notifier);
     final startedAt = session.start!;
     final endedAt = DateTime.now().toUtc();

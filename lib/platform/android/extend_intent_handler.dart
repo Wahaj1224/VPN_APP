@@ -6,7 +6,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/app.dart';
 import '../../features/session/domain/session_controller.dart';
-import '../../services/ads/rewarded_ad_service.dart';
 import '../../l10n/app_localizations.dart';
 
 final extendIntentHandlerProvider = Provider<ExtendIntentHandler>((ref) {
@@ -56,14 +55,10 @@ class ExtendIntentHandler {
     }
     final l10n = AppLocalizations.of(context);
     try {
-      await _ref
-          .read(rewardedAdServiceProvider)
-          .unlock(duration: const Duration(hours: 1), context: context);
-      await _ref
-          .read(sessionControllerProvider.notifier)
-          .extend(const Duration(hours: 1));
+      // Ads removed — if native code requests an extension, perform a silent extend
+      await _ref.read(sessionControllerProvider.notifier).extend(const Duration(hours: 1));
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        SnackBar(content: Text(l10n.sessionRemaining + ' +60m')),
+        SnackBar(content: Text('Session extended')),
       );
     } catch (error) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(

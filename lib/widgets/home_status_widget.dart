@@ -50,15 +50,7 @@ class HomeStatusWidget extends ConsumerWidget {
                   )),
           const SizedBox(height: 8),
           Text(statusText, style: Theme.of(context).textTheme.bodyLarge),
-          if (session.duration != null && session.start != null) ...[
-            const SizedBox(height: 4),
-            Text(
-              l10n.homeWidgetSessionRemaining(
-                _remaining(session),
-              ),
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ],
+          // Session remaining moved to bottom; do not show here.
           const SizedBox(height: 12),
           Text(
             l10n.homeWidgetQualitySummary(

@@ -10,6 +10,9 @@ import '../../usage/data_usage_state.dart';
 import '../domain/preferences_controller.dart';
 import '../domain/preferences_state.dart';
 import '../../../services/haptics/haptics_service.dart';
+import '../../../services/vpn/models/vpn_type.dart';
+import '../../../services/vpn/vpn_selection_provider.dart';
+import '../../onboarding/presentation/softether_config_form.dart';
 import 'privacy_policy_page.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -26,6 +29,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final preferences = ref.watch(preferencesControllerProvider);
     final referral = ref.watch(referralControllerProvider);
     final usage = ref.watch(dataUsageControllerProvider);
+    final selectedVpnType = ref.watch(selectedVpnTypeProvider);
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(24, 16, 24, 160),
@@ -37,6 +41,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         const SizedBox(height: 24),
         _buildConnectionSection(context, preferences),
         const SizedBox(height: 24),
+        if (selectedVpnType == VpnType.softEther) ...[
+          const Divider(),
+          const SizedBox(height: 24),
+          _buildSoftEtherSection(context),
+          const SizedBox(height: 24),
+        ],
         const Divider(),
         const SizedBox(height: 24),
         _buildUsageSection(context, usage),
@@ -100,6 +110,33 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               }
               await ref.read(preferencesControllerProvider.notifier).toggleHaptics(value);
             }());
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSoftEtherSection(BuildContext context) {
+    final l10n = context.l10n;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionTitle(context, 'SoftEther VPN Configuration'),
+        const SizedBox(height: 12),
+        Text(
+          'Configure your SoftEther VPN connection settings',
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+            color: Theme.of(context).colorScheme.onSurface.withOpacity(0.7),
+          ),
+        ),
+        const SizedBox(height: 16),
+        SoftEtherConfigForm(
+          onConfigChanged: (config) {
+            unawaited(
+              ref
+                  .read(softEtherConfigProvider.notifier)
+                  .setSoftEtherConfig(config),
+            );
           },
         ),
       ],
