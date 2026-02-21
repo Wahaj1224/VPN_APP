@@ -1,22 +1,25 @@
 import 'dart:async';
-import 'package:characters/characters.dart';
 import 'dart:ui';
 
+import 'package:app_settings/app_settings.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
 
 import '../../core/utils/time.dart';
 import '../../features/connection/domain/connection_quality_controller.dart';
 import '../../features/connection/domain/connection_quality.dart';
 import '../../services/storage/prefs.dart';
 import '../../services/haptics/haptics_service.dart';
+import '../../services/vpn/vpn_selection_provider.dart';
+import '../../services/vpn/models/vpn_type.dart';
 import '../../theme/colors.dart';
 import '../../widgets/connect_control.dart';
 import '../../l10n/app_localizations.dart';
 import '../onboarding/presentation/spotlight_controller.dart';
 import '../onboarding/presentation/spotlight_tour.dart';
+import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
+import '../onboarding/presentation/vpn_type_selection_screen.dart';
 import '../history/presentation/history_screen.dart';
 import '../servers/domain/server.dart';
 import '../servers/domain/server_providers.dart';
@@ -28,7 +31,6 @@ import '../session/presentation/countdown.dart';
 import '../speedtest/domain/speedtest_controller.dart';
 import '../speedtest/presentation/speedtest_screen.dart';
 import '../usage/data_usage_controller.dart';
-import '../usage/data_usage_state.dart';
 import '../settings/domain/preferences_controller.dart';
 import '../settings/presentation/privacy_policy_consent_page.dart';
 import '../settings/presentation/settings_screen.dart';
@@ -238,6 +240,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     ref.listen<SessionState>(sessionControllerProvider, _onSessionChanged);
+    final sessionStateForBottom = ref.watch(sessionControllerProvider);
     final l10n = context.l10n;
     final theme = Theme.of(context);
     return Scaffold(
@@ -278,42 +281,54 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ),
                 ),
               ),
-              child: NavigationBar(
-                height: 70,
-                backgroundColor: Colors.transparent,
-                surfaceTintColor: Colors.transparent,
-                elevation: 0,
-                indicatorColor: theme.colorScheme.primary.withOpacity(0.12),
-                labelBehavior: NavigationDestinationLabelBehavior.alwaysHide,
-                selectedIndex: _tabIndex,
-                onDestinationSelected: (index) {
-                  if (index == _tabIndex) {
-                    return;
-                  }
-                  unawaited(ref.read(hapticsServiceProvider).selection());
-                  setState(() => _tabIndex = index);
-                },
-                destinations: [
-                  NavigationDestination(
-                    icon: const Icon(Icons.shield_outlined),
-                    selectedIcon: const Icon(Icons.shield),
-                    label: l10n.navHome,
-                  ),
-                  NavigationDestination(
-                    key: _speedTabKey,
-                    icon: const Icon(Icons.speed_outlined),
-                    selectedIcon: const Icon(Icons.speed),
-                    label: l10n.navSpeedTest,
-                  ),
-                  NavigationDestination(
-                    icon: const Icon(Icons.history_outlined),
-                    selectedIcon: const Icon(Icons.history),
-                    label: l10n.navHistory,
-                  ),
-                  NavigationDestination(
-                    icon: const Icon(Icons.settings_outlined),
-                    selectedIcon: const Icon(Icons.settings),
-                    label: l10n.navSettings,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  if (sessionStateForBottom.status == SessionStatus.connected)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8.0, bottom: 4.0),
+                      child: Center(child: SessionCountdown()),
+                    ),
+                  NavigationBar(
+                    height: 70,
+                    backgroundColor: Colors.transparent,
+                    surfaceTintColor: Colors.transparent,
+                    elevation: 0,
+                    indicatorColor:
+                        theme.colorScheme.primary.withOpacity(0.12),
+                    labelBehavior:
+                        NavigationDestinationLabelBehavior.alwaysHide,
+                    selectedIndex: _tabIndex,
+                    onDestinationSelected: (index) {
+                      if (index == _tabIndex) {
+                        return;
+                      }
+                      unawaited(ref.read(hapticsServiceProvider).selection());
+                      setState(() => _tabIndex = index);
+                    },
+                    destinations: [
+                      NavigationDestination(
+                        icon: const Icon(Icons.shield_outlined),
+                        selectedIcon: const Icon(Icons.shield),
+                        label: l10n.navHome,
+                      ),
+                      NavigationDestination(
+                        key: _speedTabKey,
+                        icon: const Icon(Icons.speed_outlined),
+                        selectedIcon: const Icon(Icons.speed),
+                        label: l10n.navSpeedTest,
+                      ),
+                      NavigationDestination(
+                        icon: const Icon(Icons.history_outlined),
+                        selectedIcon: const Icon(Icons.history),
+                        label: l10n.navHistory,
+                      ),
+                      NavigationDestination(
+                        icon: const Icon(Icons.settings_outlined),
+                        selectedIcon: const Icon(Icons.settings),
+                        label: l10n.navSettings,
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -334,6 +349,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         );
     final catalog = ref.watch(serverCatalogProvider);
     final selectedServer = ref.watch(selectedServerProvider);
+    final selectedVpnType = ref.watch(selectedVpnTypeProvider);
+    final softEtherConfig = ref.watch(softEtherConfigProvider);
     final serversAsyncValue = ref.watch(serversAsync);
     final speedState = ref.watch(speedTestControllerProvider);
     final usageState = ref.watch(dataUsageControllerProvider);
@@ -435,6 +452,57 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     color: theme.colorScheme.onSurface.withOpacity(0.6),
                   ),
                 ),
+                const SizedBox(height: 16),
+                // Show current IP and location
+                if (isConnected && currentIp != '--') ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surface,
+                      border: Border.all(
+                        color: theme.colorScheme.primary.withOpacity(0.2),
+                      ),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'Your IP',
+                              style: theme.textTheme.labelSmall,
+                            ),
+                            Text(
+                              currentIp,
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                fontWeight: FontWeight.bold,
+                                color: theme.colorScheme.primary,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'Location',
+                              style: theme.textTheme.labelSmall,
+                            ),
+                            Text(
+                              locationText,
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
               ],
             ),
           ),
@@ -442,20 +510,92 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           Center(
             child: Column(
               children: [
-                Text(
-                  selectedServer?.name ?? l10n.selectServerToBegin,
-                  style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  selectedServer != null
-                      ? '${_flagEmoji(selectedServer.countryCode)}  ${selectedServer.countryCode.toUpperCase()}'
-                      : l10n.noServerSelected,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: theme.colorScheme.onSurface.withOpacity(0.65),
+                // Show different content based on VPN type
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(12),
                   ),
-                  textAlign: TextAlign.center,
+                  child: selectedVpnType == VpnType.softEther
+                      ? Column(
+                          children: [
+                            Text(
+                              'VPN Type: SoftEther',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: theme.colorScheme.onSurface.withOpacity(0.6),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'SoftEther VPN',
+                              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              softEtherConfig != null && softEtherConfig!.isValid
+                                  ? 'Server: ${softEtherConfig!.serverAddress}'
+                                  : 'Not configured',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurface.withOpacity(0.65),
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        )
+                      : Column(
+                          children: [
+                            Text(
+                              'VPN Type: OpenVPN',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: theme.colorScheme.onSurface.withOpacity(0.6),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              selectedServer?.name ?? l10n.selectServerToBegin,
+                              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              selectedServer != null
+                                  ? '${_flagEmoji(selectedServer.countryCode)}  ${selectedServer.countryCode.toUpperCase()}'
+                                  : l10n.noServerSelected,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurface.withOpacity(0.65),
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ),
+                ),
+                const SizedBox(height: 24),
+                // VPN Type Selector Button
+                SizedBox(
+                  width: 200,
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      unawaited(ref.read(hapticsServiceProvider).selection());
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const VpnTypeSelectionScreen(),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.settings),
+                    label: const Text('VPN Settings'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor:
+                          theme.colorScheme.primary.withOpacity(0.1),
+                      foregroundColor: theme.colorScheme.primary,
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 24),
                 KeyedSubtree(
@@ -484,29 +624,39 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                             .read(sessionControllerProvider.notifier)
                             .disconnect();
                       } else {
-                        final server = selectedServer;
-                        if (server == null) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text(l10n.pleaseSelectServer)),
-                          );
-                          return;
+                        // Handle both SoftEther and OpenVPN connections
+                        if (selectedVpnType == VpnType.softEther) {
+                          // For SoftEther, no server selection needed
+                          if (softEtherConfig == null || !softEtherConfig!.isValid) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Please configure SoftEther VPN in settings'),
+                              ),
+                            );
+                            return;
+                          }
+                          await ref
+                              .read(sessionControllerProvider.notifier)
+                              .connect(context: context, server: null);
+                        } else {
+                          // For OpenVPN, require server selection
+                          final server = selectedServer;
+                          if (server == null) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(l10n.pleaseSelectServer)),
+                            );
+                            return;
+                          }
+                          await ref
+                              .read(sessionControllerProvider.notifier)
+                              .connect(context: context, server: server);
                         }
-                        await ref
-                            .read(sessionControllerProvider.notifier)
-                            .connect(context: context, server: server);
                       }
                     },
                   ),
                 ),
                 const SizedBox(height: 20),
-                Text(
-                  isConnected ? l10n.sessionRemaining : l10n.unlockSecureAccess,
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    color: theme.colorScheme.onSurface.withOpacity(0.7),
-                  ),
-                ),
                 const SizedBox(height: 8),
-                const SessionCountdown(),
                 if (isConnected) ...[
                   const SizedBox(height: 24),
                   _ConnectionStatusWidget(
@@ -522,104 +672,107 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
           ),
           const SizedBox(height: 32),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  l10n.locations,
-                  style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-                ),
-                TextButton(
-                  onPressed: () {
-                    unawaited(_showServerPicker(context));
-                  },
-                  style: TextButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          // Only show server carousel for OpenVPN
+          if (selectedVpnType == VpnType.openVpn) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    l10n.locations,
+                    style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
                   ),
-                  child: Text(l10n.viewAll),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-          KeyedSubtree(
-            key: _serverCarouselKey,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                return serversAsyncValue.when(
-                  data: (servers) {
-                    final cardWidth = _serverCardWidth(constraints.maxWidth);
-                    final minHeight =
-                        _estimateServerCardHeight(constraints, servers);
-                    final carouselHeight = minHeight + 24;
-                    return SizedBox(
-                      height: carouselHeight,
-                      child: Padding(
-                        padding: EdgeInsets.symmetric(
-                          horizontal:
-                              constraints.maxWidth * 0.04, // 4% of screen width
-                        ),
-                        child: ListView.separated(
-                          scrollDirection: Axis.horizontal,
-                          itemCount: servers.length,
-                          padding: EdgeInsets.symmetric(
-                            horizontal: constraints.maxWidth * 0.02,
-                          ),
-                          physics: const BouncingScrollPhysics(),
-                          clipBehavior: Clip.none,
-                          separatorBuilder: (_, __) => SizedBox(
-                            width: constraints.maxWidth * 0.04,
-                          ),
-                          itemBuilder: (context, index) {
-                            final server = servers[index];
-                            final selected = selectedServer?.id == server.id;
-                            final latency = catalog.latencyMs[server.id];
-                            return Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 8),
-                              child: _ServerCard(
-                                server: server,
-                                selected: selected,
-                                connected: isConnected && selected,
-                                onTap: isConnected
-                                    ? null
-                                    : () {
-                                        unawaited(
-                                          ref
-                                              .read(hapticsServiceProvider)
-                                              .selection(),
-                                        );
-                                        ref
-                                            .read(selectedServerProvider.notifier)
-                                            .select(server);
-                                      },
-                                latency: latency,
-                                width: cardWidth,
-                                minHeight: minHeight,
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    );
-                  },
-                  loading: () => const SizedBox(
-                    height: 160,
-                    child: Center(child: CircularProgressIndicator()),
-                  ),
-                  error: (error, __) => Container(
-                    padding: EdgeInsets.symmetric(
-                      horizontal: constraints.maxWidth * 0.04,
-                      vertical: 16,
+                  TextButton(
+                    onPressed: () {
+                      unawaited(_showServerPicker(context));
+                    },
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     ),
-                    child: Text('${l10n.failedToLoadServers}: $error'),
+                    child: Text(l10n.viewAll),
                   ),
-                );
-              },
+                ],
+              ),
             ),
-          ),
-          const SizedBox(height: 32),
+            const SizedBox(height: 16),
+            KeyedSubtree(
+              key: _serverCarouselKey,
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  return serversAsyncValue.when(
+                    data: (servers) {
+                      final cardWidth = _serverCardWidth(constraints.maxWidth);
+                      final minHeight =
+                          _estimateServerCardHeight(constraints, servers);
+                      final carouselHeight = minHeight + 24;
+                      return SizedBox(
+                        height: carouselHeight,
+                        child: Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal:
+                                constraints.maxWidth * 0.04, // 4% of screen width
+                          ),
+                          child: ListView.separated(
+                            scrollDirection: Axis.horizontal,
+                            itemCount: servers.length,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: constraints.maxWidth * 0.02,
+                            ),
+                            physics: const BouncingScrollPhysics(),
+                            clipBehavior: Clip.none,
+                            separatorBuilder: (_, __) => SizedBox(
+                              width: constraints.maxWidth * 0.04,
+                            ),
+                            itemBuilder: (context, index) {
+                              final server = servers[index];
+                              final selected = selectedServer?.id == server.id;
+                              final latency = catalog.latencyMs[server.id];
+                              return Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 8),
+                                child: _ServerCard(
+                                  server: server,
+                                  selected: selected,
+                                  connected: isConnected && selected,
+                                  onTap: isConnected
+                                      ? null
+                                      : () {
+                                          unawaited(
+                                            ref
+                                                .read(hapticsServiceProvider)
+                                                .selection(),
+                                          );
+                                          ref
+                                              .read(selectedServerProvider.notifier)
+                                              .select(server);
+                                        },
+                                  latency: latency,
+                                  width: cardWidth,
+                                  minHeight: minHeight,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      );
+                    },
+                    loading: () => const SizedBox(
+                      height: 160,
+                      child: Center(child: CircularProgressIndicator()),
+                    ),
+                    error: (error, __) => Container(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: constraints.maxWidth * 0.04,
+                        vertical: 16,
+                      ),
+                      child: Text('${l10n.failedToLoadServers}: $error'),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 32),
+          ],
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24),
             child: Column(
@@ -1309,12 +1462,14 @@ class _ErrorDialogState extends State<_ErrorDialog> {
   @override
   void initState() {
     super.initState();
-    // Auto-dismiss after 8 seconds
-    _autoDismiss = Future.delayed(const Duration(seconds: 8), () {
-      if (mounted) {
-        Navigator.pop(context);
-      }
-    });
+    // Auto-dismiss after 8 seconds, but not for L2TP setup dialogs
+    if (!widget.errorMessage.startsWith('L2TP_IPSEC_SETUP:')) {
+      _autoDismiss = Future.delayed(const Duration(seconds: 8), () {
+        if (mounted) {
+          Navigator.pop(context);
+        }
+      });
+    }
   }
 
   bool _isBackendError(String message) {
@@ -1330,8 +1485,227 @@ class _ErrorDialogState extends State<_ErrorDialog> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isBackendError = _isBackendError(widget.errorMessage);
+    if (widget.errorMessage.startsWith('L2TP_IPSEC_SETUP:')) {
+      return _buildL2tpIpsecSetupDialog(context, theme);
+    } else {
+      return _buildRegularErrorDialog(context, theme, _isBackendError(widget.errorMessage));
+    }
+  }
 
+  Widget _buildL2tpIpsecSetupDialog(BuildContext context, ThemeData theme) {
+    // Parse the error message: L2TP_IPSEC_SETUP:connectionName:serverAddress:presharedKey:username:password
+    final parts = widget.errorMessage.split(':');
+    if (parts.length < 6) {
+      return _buildRegularErrorDialog(context, theme, false);
+    }
+
+    final connectionName = parts[1];
+    final serverAddress = parts[2];
+    final presharedKey = parts[3];
+    final username = parts[4];
+    final password = parts[5];
+
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      child: Center(
+        child: SingleChildScrollView(
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 24),
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surface,
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.2),
+                  blurRadius: 16,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // VPN icon with gradient background
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [Colors.blue.shade400, Colors.blue.shade600],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Center(
+                    child: Icon(
+                      Icons.vpn_key,
+                      size: 40,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                // Title
+                Text(
+                  'Set up L2TP/IPSec VPN',
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: theme.colorScheme.onSurface,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                // Description
+                Text(
+                  'L2TP/IPSec connections need to be configured manually in Android settings. Here are your connection details:',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurface.withOpacity(0.7),
+                    height: 1.5,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 20),
+                // Configuration details
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surfaceVariant.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: theme.colorScheme.outline.withOpacity(0.3),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildConfigRow('Name', connectionName),
+                      const SizedBox(height: 8),
+                      _buildConfigRow('Server', serverAddress),
+                      const SizedBox(height: 8),
+                      _buildConfigRow('IPSec Key', presharedKey),
+                      const SizedBox(height: 8),
+                      _buildConfigRow('Username', username),
+                      const SizedBox(height: 8),
+                      _buildConfigRow('Password', '••••••••'),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+                // Instructions
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: Colors.blue.withOpacity(0.3),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.info_outline,
+                            size: 20,
+                            color: Colors.blue,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Setup Steps:',
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.blue,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      _buildStepText('1. Tap "Open VPN Settings" below'),
+                      _buildStepText('2. Tap the "+" button to add a VPN'),
+                      _buildStepText('3. Select "L2TP/IPSec PSK" as the type'),
+                      _buildStepText('4. Enter the details shown above'),
+                      _buildStepText('5. Save and connect the VPN profile'),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+                // Action buttons
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text('Cancel'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: () async {
+                          Navigator.pop(context);
+                          // Open VPN settings
+                          try {
+                            await AppSettings.openAppSettings(type: AppSettingsType.vpn);
+                          } catch (e) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('Unable to open VPN settings: $e')),
+                              );
+                            }
+                          }
+                        },
+                        child: const Text('Open VPN Settings'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConfigRow(String label, String value) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 80,
+          child: Text(
+            '$label:',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(fontFamily: 'monospace'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStepText(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 28, bottom: 4),
+      child: Text(
+        text,
+        style: const TextStyle(fontSize: 12, height: 1.4),
+      ),
+    );
+  }
+
+  Widget _buildRegularErrorDialog(BuildContext context, ThemeData theme, bool isBackendError) {
     return Dialog(
       backgroundColor: Colors.transparent,
       elevation: 0,
